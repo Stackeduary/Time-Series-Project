@@ -1,0 +1,567 @@
+---
+title: "Time Series Analysis Project"
+author: "Bill Sendewicz"
+date: "December 8, 2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r preliminaries, include=FALSE}
+rm(list=ls())
+
+#setwd("C:/Users/Wilt Chamberlain/Documents/COURSES Fall 2020/Time Series/Project")
+
+par(mar=c(1,1,1,1))
+
+library(dplyr)
+library(data.table)
+library(forecast)
+library(tseries)
+library(TSA)
+```
+
+
+## Data Series 1: Wick Airport Rainfall
+
+My first data series represents monthly rainfall measured at Wick John O' Groats Airport in Wick, Scotland. Estimated data is marked with an asterisk after the value.
+Missing data (more than 2 days missing in month) is marked by ---.
+
+In this case, none of the data are missing. However, there are a handful of estimated values (nine to be exact) in the 1269 months of data in the series; the asterisks associated with these estimates will have to be removed from the dataset.
+
+### Inspecting the data and preparing the data for modeling
+```{r}
+series1 = read.table("wickairportdata.txt", skip=11, sep="", fill=T, strip.white=T, 
+                     dec=".", header=T, na.strings="NA", as.is=T, stringsAsFactors = F)
+
+series1 <- series1[1:6] # remove last column
+
+series1 <- series1[!(series1$yyyy == "Provisional"),] # remove rows with "Provisional"
+
+series1 <- series1 %>% slice(-c(1)) # remove second row
+
+series1 <- select(series1, -c(3:5)) # remove unwanted columns
+
+colnames(series1) <- c("Year", "Month", "Rain") # rename columns
+
+series1$Rain <- gsub("\\*", "", series1$Rain) # remove values with asterisks
+
+series1$Year <- as.numeric(series1$Year) # convert Year column to numeric
+series1$Month <- as.numeric(series1$Month) # convert Month column to numeric
+series1$Rain <- as.numeric(series1$Rain) # convert Rain column to numeric
+
+str(series1)
+head(series1)
+tail(series1)
+
+table(series1$Year) # to ensure that no data are missing
+```
+
+No data are missing in this series.
+
+Let's examine the time series, its plot, autocorrelations plot and partial autocorrelations plot.
+```{r}
+z1 <- ts(series1$Rain, frequency=12, start=c(series1$Year[1], series1$Month[1]))
+
+plot(z1)
+
+acf(z1, 50)
+
+pacf(z1, 50)
+```
+
+Three things jump out at me from the time series plot and the ACF and PACF plots: 
+
+1. The original series is not stationary.
+
+2. There is obvious seasonality in the data.
+
+3. There does not appear to be any trend in the data.
+
+Let's confirm these three observations using the decompose function:
+```{r}
+plot(decompose(z1, type = "additive", filter = NULL))
+
+plot(decompose(z1, type = "multiplicative", filter = NULL))
+```
+
+These two plots confirm that there is no trend in the data but there is yearly seasonality. It makes sense that there is no trend in rainfall data but that there is a seasonal aspect to rainfall.
+
+
+My first objective is to transform the data so they are stationary.
+
+Because the data are monthly, and peaks and troughs in the data repeat every 12 lags, there is no need to take an ordinary difference, but taking a seasonal difference is necessary. Let's try taking a seasonal difference ($s = 12$).
+```{r}
+plot(diff(z1, 12))
+
+acf(diff(z1, 12), 60)
+
+pacf(diff(z1, 12), 60)
+
+```
+
+Now the differenced time series looks stationary. Furthermore, all but one lag in the ACF plot is within the 95% confidence interval. That tells me that MA(1) for low order terms looks to be a good candidate model. Let's start with an $ARIMA(0,0,1)x(0,1,0)_{12}$ model:
+```{r}
+z1ARIMA001x010_12model <- arima(z1, order=c(0,0,1), seasonal = list(order=c(0,1,0), period=12))
+
+tsdiag(z1ARIMA001x010_12model, 40)
+
+errors <- residuals(z1ARIMA001x010_12model)
+
+plot(errors)
+
+acf(errors)
+```
+
+This model is not suitable based on the plot of Ljung-Box test values even though the residuals appear to be a white noise process. 
+
+Looking at the autocorrelations plot, lag 12 is outside of the 95% confidence interval.
+
+Combining these two pieces of information, it is clear that an $ARIMA(0,0,1)x(0,1,0)_{12}$ model is not suitable for predictions.
+
+Let's try an $ARIMA(0,0,1)x(0,1,1)_{12}$ model, since the plot of autocorrelations of residuals above suggests additional information from lag 12 should be included in the model.
+
+```{r}
+z1ARIMA001x011_12model <- arima(z1, order=c(0,0,1), seasonal = list(order=c(0,1,1), period=12))
+
+tsdiag(z1ARIMA001x011_12model, 40)
+
+errors <- residuals(z1ARIMA001x011_12model)
+
+plot(errors)
+
+acf(errors)
+```
+
+This looks like a strong model based on the plot of Ljung-Box test values. Additionally, the plot of residuals looks like a white noise process. Furthermore, the plot of autocorrelations of residuals shows that they are all within the 95% confidence interval. 
+
+Let's run the Ljung-Box test to be extra sure.
+```{r}
+Box.test(errors, 60, type = "Ljung-Box", fitdf=2)
+```
+
+
+Since the p-value = 0.9203 is well above 0.05 for group size 60, we can retain the null hypothesis that this model can be used for predictions.
+
+Let's examine the model parameters in greater detail now that we know it is a good model to use for making predictions.
+
+```{r}
+z1ARIMA001x011_12model
+```
+
+The AIC value for this model is 11,941.22. 
+
+The equation of an $ARIMA(0,0,1)x(0,1,1)_{12}$ model is the following:
+
+$$(1 - B^{12})Z_t = (1 + \theta_1B)(1 + \Theta_1 B^{12})A_t$$
+
+This is equivalent to
+
+$$Z_t = Z_{t-12} + A_t + \theta_1 A_{t-1} + \Theta_1 A_{t-12} + \theta_1 \Theta_1 A_{t-13}$$
+
+$\theta_1 = 0.0197$ and $\Theta_1 = -0.9911$.
+
+Thus the equation of this model is:
+
+$$Z_t = Z_{t-12} + A_t + 0.0197 A_{t-1} - 0.9911 A_{t-12} - 0.0195 A_{t-13}$$
+
+
+Because the Ljung-Box value for group size 60 for this model is very close to 1, residuals resemble a white noise process and autocorrelations of residuals are all within the 95% confidence interval, I consider this model to be quite strong and thus, do not need to continue searching for better models. 
+
+Now, let's predict the next four values.
+
+```{r}
+predict(z1ARIMA001x011_12model, 4)
+```
+
+
+The following is a graph of the actual and fitted values for all observations in the time series:
+```{r}
+plot(z1, col="orange", main="Actual and Fitted Values for Rainfall at Wick Airport, Scotland",
+     ylab="Monthly Rainfall (mm) at Wick Airport, Scotland")
+
+lines(fitted(z1ARIMA001x011_12model), col="blue")
+
+legend("topleft", inset=.02, legend=c("actual","fitted"), col=c("orange","blue"),lty=1, box.lty=0)
+```
+
+
+
+The 12 most recent actual and fitted values, and predicted values with 95% prediction intervals:
+```{r}
+# last 12 actual values and next four predictions with 95% confidence intervals
+pred1 <- plot(z1ARIMA001x011_12model, n.ahead=4, 
+              main="Last 12 Actual and Fitted Values and Next 4 Predictions",
+              ylab='Monthly Rainfall (mm) at Wick Airport, Scotland', 
+              xlab='Month', n1=c(2018, 10), pch=19)
+
+# add fitted values
+points(fitted(z1ARIMA001x011_12model), col="blue")
+lines(fitted(z1ARIMA001x011_12model), col="blue")
+
+lines(pred1$lpi, col="green")
+lines(pred1$upi, col="green")
+
+legend("topleft", inset=0.02,
+       legend=c("Actual", "Fitted", "Predicted", "95% Confidence Interval"),
+       col=c("black","blue","black","green"), cex=.5, lty=c(1,1,2,1))
+
+```
+
+
+
+```{r include=F}
+measures <- function(method){
+  errors <- residuals(method)
+  MAD <- mean(abs(errors))
+  RMSE <- sqrt(mean(errors^2))
+  MAPE <- mean(abs(errors)/method$x)
+  result <- c(MAD,RMSE,MAPE)
+  names(result)<-c("MAD","RMSE","MAPE")
+  return(result)
+}
+```
+
+Now let's find the best model using exponential smoothing and the Holt-Winters method.
+
+Holt-Winters smoothing:
+```{r}
+### exponential smoothing: 
+expSmoothing <- HoltWinters(z1, beta=F, gamma=F)
+
+### Holt's method (no seasonality): 
+### HoltWinters(x, gamma=F)
+
+### Holt-Winter's multiplicative: 
+HWmult <- HoltWinters(z1, seasonal="multiplicative") 
+
+### Holt-Winter's additive: 
+HWadd <- HoltWinters(z1, seasonal="additive")
+```
+Holt's method assumes no seasonality, which is not appropriate here, so this method will be omitted.
+
+The original time series $z_1$ does not pass through zero, so Holt-Winters multiplicative is appropriate in this situation.
+
+```{r}
+exp_measures <- measures(expSmoothing)
+HW_add_measures <- measures(HWadd)
+HW_mult_measures <- measures(HWmult)
+
+data.frame(rbind(exp_measures, HW_add_measures, HW_mult_measures))
+```
+
+The Holt-Winters multiplicative model is the best of the three using MAD, RMSE and MAPE measures.
+
+Let's examine the autocorrelations of residuals of the Holt-Winters multiplicative model.
+
+
+```{r}
+acf(residuals(HWmult))
+```
+
+All residuals are within the 95% confidence interval.
+
+
+The 12 most recent actual and fitted values and predicted values for Holt-Winters multiplicative model and $ARIMA(0,0,1)x(0,1,0)_{12}$ model:
+```{r}
+# actual values
+last_12_actual <- series1$Rain[c((nrow(series1)-11):nrow(series1))]
+last_12_actual <- ts(last_12_actual, start=c(2018,10), frequency = 12)
+
+# Holt-Winters fitted
+HWmult_resid <- residuals(HWmult)
+HWmult_resid <- HWmult_resid[1246:1257]
+HWresiduals <- ts(HWmult_resid, start=c(2018,10), frequency = 12)
+last_12_fitted_HW <- last_12_actual - HWresiduals
+
+# Holt-Winters and ARIMA predictions
+predictions_holt <- predict(HWmult, 4)
+predictionsSARIMA <- predict(z1ARIMA001x011_12model, 4)
+
+# SARIMA fitted
+SARIMA_resid <- residuals(z1ARIMA001x011_12model)
+SARIMA_resid <- SARIMA_resid[1246:1257]
+last_12_fitted_SARIMA <- last_12_actual - SARIMA_resid
+
+# Actual values
+plot(last_12_actual, ylim = c(0, 110), xlim=c(2018.75,2020), col="blue", 
+     ylab="Monthly Rainfall (mm) at Wick Airport",
+     main="Actual, Fitted and Predicted Values, HW Mult and SARIMA Models")
+points(last_12_actual, col="blue")
+
+# Holt_Winters multiplicative model fitted and predicted values
+lines(last_12_fitted_HW, col="green")
+points(last_12_fitted_HW, col="green")
+lines(predictions_holt, col="green", lty=2)
+points(predictions_holt, col="green", lty=2)
+
+# SARIMA model fitted and predicted values
+lines(last_12_fitted_SARIMA, col="red")
+points(last_12_fitted_SARIMA, col="red")
+lines(predictionsSARIMA$pred, col="red", lty=2)
+points(predictionsSARIMA$pred, col="red", lty=2)
+
+legend("bottomright", inset=.02, 
+      legend=c("Actual", "Holt-Winters Mult Fitted", 
+      "Holt-Winters Mult Predicted", "SARIMA Fitted", "SARIMA Predicted"),
+      col=c("blue","green","green","red", "red"), cex=.5, lty=c(1,1,2,1,2))
+
+```
+
+
+
+
+## Data Series 2: GF027: State Budget Tax Revenues by Year and Month
+
+My second data series represents state budget tax revenues in Estonia by month and year in thousands of euros.
+
+### Inspecting the data and preparing the data for modeling
+```{r}
+series2 <- read.table("GF027s_SOCIAL.csv", skip=2, sep=";", dec=".", 
+                      header=T, na.strings="..", as.is=T)
+
+setDT(series2)
+
+months <- c("January", "February", "March", "April", "May", "June", 
+            "July", "August", "September", "October", "November", "December")
+
+
+series2 <- series2 %>% 
+  select(-1) %>%
+  slice(-1) %>%
+  rename(Year = X.1) %>%
+  melt(id.vars = "Year",value.name = "Tax_Revenue") %>% 
+  rename(Month = variable) %>% 
+  mutate(Month_num = match(Month, months)) %>% 
+  select(Year, Month_num, Tax_Revenue) %>%
+  arrange(Year, Month_num)
+
+series2 <- series2[1:237] # remove first row and last seven rows
+
+
+str(series2)
+
+head(series2)
+tail(series2)
+
+table(series2$Year) # to ensure that no data are missing
+```
+
+No data are missing in this series.
+
+```{r}
+z2 <- ts(series2$Tax_Revenue, frequency=12, start=c(series2$Year[1], series2$Month[1]))
+
+plot(z2)
+
+acf(z2, 50)
+
+pacf(z2, 50)
+```
+
+
+
+Three things jump out at me from the time series plot and the ACF and PACF plots: 
+
+1. The original series is not stationary.
+
+2. There is obvious seasonality in the data.
+
+3. There is obvious trend in the data.
+
+Let's confirm these three observations using the decompose function:
+```{r}
+plot(decompose(z2, type = "additive", filter = NULL))
+
+plot(decompose(z2, type = "multiplicative", filter = NULL))
+```
+
+These two plots confirm that there is trend in the data as well as yearly seasonality. It makes sense that there is trend in tax revenue data (due to cost of living increases and inflation) as well as a seasonal aspect, since many types of taxes are collected at discrete points in the calendar year rather than continuously (in the case of sales tax for example).
+
+
+My first objective is to transform the data so they are stationary.
+
+Let's start by taking a seasonal difference (s = 12).
+
+```{r}
+plot(diff(z2, 12))
+
+acf(diff(z2, 12), 50)
+
+pacf(diff(z2, 12), 50)
+```
+
+The seasonal differenced series is still not stationary, has no fixed mean and has noticeable trend, aside from the massive dip thanks to the Great Financial Crisis (thank you, Bear Stearns and AIG).
+
+Let's follow the procedure sketched out in pp. 2-5 of the Week 9 lecture notes and take an ordinary difference to detrend the seasonal differenced series.
+
+```{r}
+plot(diff(diff(z2), 12))
+
+acf(diff(diff(z2), 12), 50)
+
+pacf(diff(diff(z2), 12), 50)
+```
+
+
+Now the series looks stationary.
+
+Judging from the ACF plot of the seasonally differenced and ordinary differenced series, MA(1) and MA(2) are candidate models for the low order terms. 
+
+Since there are no lags outside of the 95% confidence interval for multiples of 12, it may be the case that an $ARIMA(p,1,q)x(0,1,0)_{12}$ model is suitable.
+
+Let's start with an $ARIMA(0,1,1)x(0,1,0)_{12}$ model.
+
+```{r}
+z2ARIMA011x010_12model <- arima(z2, order=c(0,1,1), seasonal = list(order=c(0,1,0), period=12))
+
+
+tsdiag(z2ARIMA011x010_12model, 40)
+
+errors <- residuals(z2ARIMA011x010_12model)
+plot(errors)
+
+acf(errors)
+
+Box.test(errors, 60, type = "Ljung-Box", fitdf=1)
+```
+
+This is not a suitable model as Ljung-Box values are all below the threshold for group sizes 3 and above, as well as the fact that autocorrelations of residuals are outside of the 95% confidence interval for multiple lags.
+
+Instead, let's try an $ARIMA(0,1,2)x(0,1,0)_{12}$ model.
+
+```{r}
+z2ARIMA012x010_12model <- arima(z2, order=c(0,1,2), seasonal = list(order=c(0,1,0), period=12))
+
+
+tsdiag(z2ARIMA012x010_12model, 40)
+
+errors <- residuals(z2ARIMA012x010_12model)
+plot(errors)
+
+acf(errors)
+
+Box.test(errors, 60, type = "Ljung-Box", fitdf=2)
+```
+
+
+Also not a suitable model as Ljung-Box values are all below the threshold for group sizes 3 and above, as well as the fact that autocorrelations of residuals are outside of the 95% confidence interval for multiple lags.
+
+Let's try an $ARIMA(1,1,2)x(0,1,0)_{12}$ model.
+
+
+```{r}
+z2ARIMA112x010_12model <- arima(z2, order=c(1,1,2), seasonal = list(order=c(0,1,0), period=12))
+
+
+tsdiag(z2ARIMA112x010_12model, 40)
+
+errors <- residuals(z2ARIMA112x010_12model)
+plot(errors)
+
+acf(errors)
+
+Box.test(errors, 60, type = "Ljung-Box", fitdf=3)
+```
+This looks to be a strong model based on the residuals resembling white noise. In addition, Ljung-Box values are above the significance threshold.
+
+This is confirmed by examining the Ljung-Box test p-value, which equals 0.833 for group size 60. Thus we retain the null hypothesis that the time series is iid, i.e., white noise, since the p-value > 0.05. Furthermore, all autocorrelations of residuals are within the 95% confidence interval.
+
+
+Just to be thorough, I also examined an $ARIMA(1,1,2)x(1,1,1)_{12}$ model.
+
+```{r}
+z2ARIMA112x111_12model <- arima(z2, order=c(1,1,2), seasonal = list(order=c(1,1,1), period=12))
+
+
+tsdiag(z2ARIMA112x111_12model, 40)
+
+errors <- residuals(z2ARIMA112x111_12model)
+plot(errors)
+
+acf(errors)
+
+Box.test(errors, 60, type = "Ljung-Box", fitdf=5)
+```
+
+This is also a good model based on the residuals resembling white white noise. In addition, Ljung-Box values are above the significance threshold.
+
+This is confirmed by examining the Ljung-Box test p-value, which equals 0.7358 for group size 60. Thus we retain the null hypothesis that the time series is iid, i.e., white noise, since the p-value > 0.05. Furthermore, all autocorrelations of residuals are within the 95% confidence interval.
+
+I examined nearly a dozen other models before writing this report, but the two models immediately above were the only two models that were suitable for predictions. So let's compare the two:
+
+```{r}
+AIC(z2ARIMA112x010_12model, z2ARIMA112x111_12model)
+
+BIC(z2ARIMA112x010_12model, z2ARIMA112x111_12model)
+```
+
+I chose to use the $ARIMA(1,1,2)x(0,1,0)_{12}$ model because it has a lower BIC and fewer parameters than the $ARIMA(1,1,2)x(1,1,1)_{12}$ model.
+
+```{r}
+z2ARIMA112x010_12model
+```
+
+The equation of an $ARIMA(1,1,2)x(0,1,0)_{12}$ model is the following:
+
+$$(1 - \phi_1B)(1 - B)(1 - B^{12})Z_t = (1 + \theta_1B + \theta_2B^2)A_t$$
+
+This is equivalent to
+
+$$Z_t = (1 + \phi_1)Z_{t-1} - \phi_1Z_{t-2} + Z_{t-12} - (1 + \phi_1)Z_{t-13} + \phi_1Z_{t-14} + A_t + \theta_1 A_{t-1} + \theta_2 A_{t-2}$$
+
+$\phi_1 = 0.8335$, $\theta_1 = -1.4746$ and $\theta_2 = 0.7274$.
+
+Thus the equation of this model is:
+
+$$Z_t = 1.8335 Z_{t-1} - 0.8335 Z_{t-2} + Z_{t-12} - 1.8335 Z_{t-13} + 0.8335 Z_{t-14} + A_t - 1.4746 A_{t-1} + 0.7274 A_{t-2}$$
+
+
+Now, let's predict the next four values.
+
+```{r}
+predict(z2ARIMA112x010_12model, 4)
+```
+
+
+The following is a graph of the actual and fitted values for all observations in the time series:
+```{r}
+plot(z2, col="orange", main="GF027: State Budget Tax Revenues by Year and Month",
+     ylab="Monthly Tax Revenue (eur)")
+
+lines(fitted(z2ARIMA112x010_12model), col="blue")
+
+legend("topleft", inset=.02, legend=c("Actual", "Fitted"),
+       col=c("orange","blue"),lty=1, box.lty=0)
+```
+
+
+The 12 most recent actual and fitted values, and predicted values with 95% prediction intervals:
+```{r}
+# last 12 actual values and next four predictions with 95% confidence intervals
+pred2 <- plot(z2ARIMA112x010_12model, n.ahead=4, 
+              main="Last 12 Actual and Fitted Values and Next 4 Predictions",
+              ylab='Monthly Tax Revenue (eur)', xlab='Month', n1=c(2018, 10), pch=19)
+
+# add fitted values
+points(fitted(z2ARIMA112x010_12model), col="blue")
+lines(fitted(z2ARIMA112x010_12model), col="blue")
+
+lines(pred2$lpi, col="green")
+lines(pred2$upi, col="green")
+
+legend("topleft", inset=0.02,
+       legend=c("Actual", "Fitted", "Predicted", "95% Confidence Interval"),
+       col=c("black","blue","black", "green"), cex=.5, lty=c(1,1,2,1))
+```
+
+
+```{r include=F}
+save(z1, z2, file = "Bill Sendewicz Project Data.RData")
+```
+
